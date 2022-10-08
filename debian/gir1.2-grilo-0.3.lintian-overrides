@@ -1,0 +1,3 @@
+gir1.2-grilo-0.3: typelib-package-name-does-not-match usr/lib/*/girepository-1.0/Grl-0.3.typelib gir1.2-grl-0.3
+gir1.2-grilo-0.3: typelib-package-name-does-not-match usr/lib/*/girepository-1.0/GrlNet-0.3.typelib gir1.2-grlnet-0.3
+gir1.2-grilo-0.3: typelib-package-name-does-not-match usr/lib/*/girepository-1.0/GrlPls-0.3.typelib gir1.2-grlpls-0.3

@@ -1,0 +1,27 @@
+#!/usr/bin/make -f
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+CPPFLAGS = $(shell dpkg-buildflags --get CPPFLAGS) \
+	-Wno-deprecated-declarations
+
+ifneq (,$(filter nodoc,$(DEB_BUILD_OPTIONS)))
+	EXTRA_CONFIGURE_ARGUMENTS += -Denable-gtk-doc=false
+else
+	EXTRA_CONFIGURE_ARGUMENTS += -Denable-gtk-doc=true
+endif
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+	dh_auto_configure -- -Denable-vala=true -Denable-introspection=true \
+		-Denable-grl-net=true $(EXTRA_CONFIGURE_ARGUMENTS)
+
+# Create a dummy doc directory in case the "nodoc" build option is set
+override_dh_install:
+	mkdir -p $(CURDIR)/debian/tmp/usr/share/gtk-doc/html
+	dh_install
+
+override_dh_missing:
+	dh_missing --fail-missing
