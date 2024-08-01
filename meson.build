@@ -6,14 +6,14 @@
 # Copyright (C) 2016 Igalia S.L. All rights reserved.
 
 project('grilo', 'c',
-        version: '0.3.14',
+        version: '0.3.16',
         default_options: [
             'buildtype=debugoptimized',
             'c_std=gnu99',
             'warning_level=1'
         ],
         license: 'LGPL-2.1-or-later',
-        meson_version: '>= 0.46.0')
+        meson_version: '>= 0.62.0')
 
 grilo_version = meson.project_version()
 grlnet_version = meson.project_version()
@@ -37,7 +37,7 @@ grlpls_lt_version = '@0@.@1@.@2@'.format(soversion, current, grlpls_interface_ag
 grl_majorminor = '@0@.@1@'.format(version_array[0], version_array[1])
 grl_name = '@0@-@1@'.format(meson.project_name(), grl_majorminor)
 
-glib2_required = '2.58'
+glib2_required = '2.66'
 glib2_required_info = '>= @0@'.format(glib2_required)
 
 gio_dep = dependency('gio-2.0', version: glib2_required_info, required: true)
@@ -48,7 +48,13 @@ libxml_dep = dependency('libxml-2.0', required: true)
 
 enable_grlnet = get_option('enable-grl-net')
 if enable_grlnet
-    libsoup_dep = dependency('libsoup-2.4', version: '>= 2.41.3', required: true)
+    if get_option('soup3')
+        libsoup_dep = dependency('libsoup-3.0', version: '>= 2.99.2', required: true)
+        soup_api_version = '3.0'
+    else
+        libsoup_dep = dependency('libsoup-2.4', version: '>= 2.41.3', required: true)
+        soup_api_version = '2.4'
+    endif
 endif
 
 enable_grlpls = get_option('enable-grl-pls')
@@ -82,7 +88,6 @@ plugins_dir_for_pc_file = join_paths('${libdir}', grl_name)
 localedir = join_paths(prefix, get_option('localedir'))
 datadir_unprefixed = get_option('datadir')
 datadir = join_paths(prefix, datadir_unprefixed)
-datadir_for_pc_file = join_paths('${prefix}', datadir_unprefixed)
 
 girdir = join_paths(datadir, 'gir-1.0')
 girdir_for_pc_file = join_paths('${datadir}', 'gir-1.0')
@@ -90,16 +95,16 @@ typelibdir = join_paths(libdir, 'girepository-1.0')
 typelibdir_for_pc_file = join_paths('${libdir}', 'girepository-1.0')
 gobject_introspection = dependency('gobject-introspection-1.0', required: false)
 if gobject_introspection.found()
-    girdir = gobject_introspection.get_pkgconfig_variable('girdir', define_variable: ['datadir', datadir])
-    girdir_for_pc_file = gobject_introspection.get_pkgconfig_variable('girdir', define_variable: ['datadir', '${datadir}'])
-    typelibdir = gobject_introspection.get_pkgconfig_variable('typelibdir', define_variable: ['libdir', libdir])
-    typelibdir_for_pc_file = gobject_introspection.get_pkgconfig_variable('typelibdir', define_variable: ['libdir', '${libdir}'])
+    girdir = gobject_introspection.get_variable(pkgconfig: 'girdir', pkgconfig_define: ['datadir', datadir])
+    girdir_for_pc_file = gobject_introspection.get_variable(pkgconfig: 'girdir', pkgconfig_define: ['datadir', '${datadir}'])
+    typelibdir = gobject_introspection.get_variable(pkgconfig: 'typelibdir', pkgconfig_define: ['libdir', libdir])
+    typelibdir_for_pc_file = gobject_introspection.get_variable(pkgconfig: 'typelibdir', pkgconfig_define: ['libdir', '${libdir}'])
 endif
 
 vapidir = join_paths(datadir, 'vala', 'vapi')
 vapigen = dependency('vapigen', required: false)
 if vapigen.found()
-    vapidir = vapigen.get_pkgconfig_variable('vapidir', define_variable: ['datadir', datadir])
+    vapidir = vapigen.get_variable(pkgconfig: 'vapidir', pkgconfig_define: ['datadir', datadir])
 endif
 
 cdata = configuration_data()

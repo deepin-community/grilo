@@ -1,3 +1,44 @@
+grilo (0.3.16-1) unstable; urgency=medium
+
+  * New upstream release.
+  * debian/copyright:
+    - Update copyright years.
+  * debian/control:
+    - Update Standards-Version to 4.6.2 (no changes).
+    - Remove duplicate Breaks: entry.
+
+ -- Alberto Garcia <berto@igalia.com>  Tue, 26 Sep 2023 17:18:45 +0200
+
+grilo (0.3.15-1.1) unstable; urgency=medium
+
+  * Non-maintainer upload
+  * Build with libsoup3
+  * debian/control: Add Breaks to ensure dependent apps switch to libsoup3
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Tue, 13 Jun 2023 10:16:49 -0400
+
+grilo (0.3.15-1) unstable; urgency=medium
+
+  [ Alberto Garcia ]
+  * New upstream release.
+  * debian/rules:
+    - Build with -Dsoup3=false
+  * debian/control:
+    - Update Standards-Version to 4.6.1.0 (no changes).
+    - Set debhelper compatibility level to 13.
+  * libgrilo-0.3-0.symbols:
+    - Add missing Build-Depends-Package entries.
+  * Update format of lintian overrides.
+  * debian/copyright:
+    - Update copyright years.
+
+  [ Debian Janitor ]
+  * Remove constraints unnecessary since buster:
+    + Build-Depends: Drop versioned constraint on gobject-introspection,
+      libglib2.0-dev and valac.
+
+ -- Alberto Garcia <berto@igalia.com>  Wed, 24 Aug 2022 16:45:27 +0200
+
 grilo (0.3.14-1) unstable; urgency=medium
 
   * New upstream release.

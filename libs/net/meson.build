@@ -41,7 +41,8 @@ libgrlnet = shared_library('grlnet-@0@'.format(grl_majorminor),
 
 libgrlnet_dep = declare_dependency(link_with: libgrlnet,
     include_directories: [libgrl_inc, libgrlnet_inc],
-    dependencies: [libsoup_dep, libgrl_dep])
+    dependencies: [libsoup_dep, libgrl_dep],
+    variables: {'soupapiversion': soup_api_version})
 
 grlnet_pc = pkgconfig.generate(libgrlnet,
     filebase: 'grilo-net-@0@'.format(grl_majorminor),
@@ -51,11 +52,9 @@ grlnet_pc = pkgconfig.generate(libgrlnet,
     description: 'Grilo networking helpers for plug-ins',
     version: grlnet_version,
     variables: [
-        'exec_prefix=${prefix}',
-        'datarootdir=' + datadir_for_pc_file,
-        'datadir=${datarootdir}',
         'girdir=' + girdir_for_pc_file,
         'typelibdir=' + typelibdir_for_pc_file,
+        'soupapiversion=' + soup_api_version,
     ],
 )
 
@@ -67,7 +66,7 @@ if enable_gir
         identifier_prefix: 'GrlNet',
         symbol_prefix: 'grl_net',
         dependencies: [ gobject_dep, gio_dep, libsoup_dep ],
-        includes: [ 'GObject-2.0', 'Gio-2.0', 'Soup-2.4' ],
+        includes: [ 'GObject-2.0', 'Gio-2.0', 'Soup-' + soup_api_version ],
         include_directories: libs_inc,
         install: true,
         extra_args: [ '--c-include=net/grl-net.h' ])

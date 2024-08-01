@@ -1,16 +1,29 @@
 image: fedora:latest
 
 variables:
-  DEPENDENCIES: chrpath vala gtk-doc
-                gobject-introspection-devel libxml2-devel
-                libsoup-devel glib2-devel gtk3-devel
-                liboauth-devel totem-pl-parser-devel
-                meson redhat-rpm-config gcc gcc-c++ glibc-devel
+  DEPENDENCIES: chrpath
+                vala
+                gtk-doc
+                gobject-introspection-devel
+                libxml2-devel
+                glib2-devel
+                gtk3-devel
+                liboauth-devel
+                totem-pl-parser-devel
+                meson
+                redhat-rpm-config
+                gcc
+                gcc-c++
+                glibc-devel
+                libabigail
+  SOUP2_DEPS: libsoup-devel
+  SOUP3_DEPS: libsoup3-devel
+  LAST_ABI_BREAK: 60d135ef64f16671bb0ab4079ecbc59bdc32cbc7
 
 build_stable:
   before_script:
     - dnf update -y --nogpgcheck
-    - dnf install -y --nogpgcheck $DEPENDENCIES
+    - dnf install -y --nogpgcheck $DEPENDENCIES $SOUP3_DEPS
   script:
     - meson . _build --prefix=/usr
     - ninja -C _build
@@ -20,9 +33,25 @@ build_stable:
 build_no_optional_libs:
   before_script:
     - dnf update -y --nogpgcheck
-    - dnf install -y --nogpgcheck $DEPENDENCIES
+    - dnf install -y --nogpgcheck $DEPENDENCIES $SOUP2_DEPS
   script:
-    - meson . _build --prefix=/usr -Denable-grl-net=false -Denable-grl-pls=false
+    - meson . _build --prefix=/usr -Denable-grl-net=true -Denable-grl-pls=true -Dsoup3=false
     - ninja -C _build
     - ninja -C _build install
     - ninja -C _build test
+    - curl https://gitlab.freedesktop.org/hadess/check-abi/-/raw/main/contrib/check-abi-fedora.sh | bash
+    - check-abi --old-parameters="-Denable-grl-net=true -Denable-grl-pls=true" --new-parameters="-Denable-grl-net=true -Denable-grl-pls=true -Dsoup3=false" ${LAST_ABI_BREAK} $(git rev-parse HEAD)
+
+build_no_optional_libs_soup3:
+  before_script:
+    - dnf update -y --nogpgcheck
+    - dnf install -y --nogpgcheck $DEPENDENCIES $SOUP3_DEPS
+  script:
+    - meson . _build --prefix=/usr -Denable-grl-net=true -Denable-grl-pls=true -Dsoup3=true
+    - ninja -C _build
+    - ninja -C _build install
+    - ninja -C _build test
+    - curl https://gitlab.freedesktop.org/hadess/check-abi/-/raw/main/contrib/check-abi-fedora.sh | bash
+    # For the soup2 build
+    - dnf install -y --nogpgcheck $SOUP2_DEPS
+    - check-abi --old-parameters="-Denable-grl-net=true -Denable-grl-pls=true" --new-parameters="-Denable-grl-net=true -Denable-grl-pls=true -Dsoup3=true" ${LAST_ABI_BREAK} $(git rev-parse HEAD)

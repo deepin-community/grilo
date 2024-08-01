@@ -39,18 +39,20 @@
 #include "config.h"
 #endif
 
-#define LIBSOUP_USE_UNSTABLE_REQUEST_API
-
 #include <errno.h>
 #include <glib/gi18n-lib.h>
 #include <glib/gstdio.h>
 #include <libsoup/soup-cache.h>
+#if ! SOUP_CHECK_VERSION (2, 99, 2)
+#define LIBSOUP_USE_UNSTABLE_REQUEST_API
 #include <libsoup/soup-request-http.h>
+#endif
 #include <libsoup/soup.h>
 #include <string.h>
 
 #include <grilo.h>
 #include "grl-net-wc.h"
+#include "grl-net-wc-private.h"
 #include "grl-net-mock-private.h"
 
 #define GRL_LOG_DOMAIN_DEFAULT wc_log_domain
@@ -68,24 +70,14 @@ enum {
 };
 
 struct request_res {
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  SoupMessage *message;
+#else
   SoupRequest *request;
+#endif
   gchar *buffer;
   gsize length;
   gsize offset;
-};
-
-struct _GrlNetWcPrivate {
-  SoupSession *session;
-  SoupLoggerLogLevel log_level;
-  /* throttling in secs */
-  guint throttling;
-  /* last request time, timestamp in seconds */
-  gint64 last_request;
-  /* closure queue for delayed requests */
-  GQueue *pending;
-  /* cache size in Mb */
-  guint cache_size;
-  gchar *previous_data;
 };
 
 static const char *capture_dir = NULL;
@@ -96,7 +88,7 @@ grl_net_wc_error_quark (void)
   return g_quark_from_static_string ("grl-wc-error-quark");
 }
 
-G_DEFINE_TYPE_WITH_PRIVATE (GrlNetWc, grl_net_wc, G_TYPE_OBJECT);
+G_DEFINE_TYPE (GrlNetWc, grl_net_wc, G_TYPE_OBJECT);
 
 static void grl_net_wc_finalize (GObject *object);
 static void grl_net_wc_set_property (GObject *object,
@@ -137,6 +129,10 @@ grl_net_wc_class_init (GrlNetWcClass *klass)
    *
    * The timeout in seconds between connections. All the connections will be
    * queued and each one will be dispatched after waiting this value.
+   *
+   * Note that if the grl-net library was compiled against libsoup3, changing
+   * the throttling configuration will show a warning if done after the first
+   * request.
    */
   g_object_class_install_property (g_klass,
                                    PROP_THROTTLING,
@@ -195,10 +191,15 @@ free_op_res (void *op)
 {
   struct request_res *rr = op;
 
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  g_object_unref (rr->message);
+#else
   g_object_unref (rr->request);
+#endif
   g_slice_free (struct request_res, rr);
 }
 
+#if ! SOUP_CHECK_VERSION (2, 99, 2)
 /*
  * use-thread-context is available for libsoup-2.4 >= 2.39.0
  * We check in run-time if it's available
@@ -206,13 +207,31 @@ free_op_res (void *op)
 static void
 set_thread_context (GrlNetWc *self)
 {
-    GrlNetWcPrivate *priv = self->priv;
-    GObjectClass *klass = G_OBJECT_GET_CLASS (priv->session);
+    GObjectClass *klass = G_OBJECT_GET_CLASS (self->session);
     GParamSpec *spec = g_object_class_find_property (klass,
                                                      "use-thread-context");
     if (spec)
-      g_object_set (priv->session, "use-thread-context", TRUE, NULL);
+      g_object_set (self->session, "use-thread-context", TRUE, NULL);
 }
+#endif
+
+#if SOUP_CHECK_VERSION (2, 99, 2)
+static void
+ensure_session (GrlNetWc *self)
+{
+  guint max_conns_per_host = self->throttling > 0 ? 1 : 2;
+
+  if (self->session)
+    return;
+
+  self->session = soup_session_new_with_options ("max-conns-per-host", max_conns_per_host,
+                                                 "user-agent", self->user_agent,
+                                                 NULL);
+  grl_net_wc_set_log_level (self, self->log_level);
+  grl_net_wc_set_cache (self, self->use_cache);
+  grl_net_wc_set_cache_size (self, self->cache_size);
+}
+#endif
 
 static void
 init_dump_directory (void)
@@ -237,12 +256,15 @@ static void
 cache_down (GrlNetWc *self)
 {
   GFile *cache_dir_file;
-  GrlNetWcPrivate *priv = self->priv;
-  SoupSessionFeature *cache = soup_session_get_feature (priv->session, SOUP_TYPE_CACHE);
+  SoupSessionFeature *cache;
   gchar *cache_dir;
 
   GRL_DEBUG ("cache down");
 
+  if (!self->session)
+    return;
+
+  cache = soup_session_get_feature (self->session, SOUP_TYPE_CACHE);
   if (!cache) {
     return;
   }
@@ -256,14 +278,13 @@ cache_down (GrlNetWc *self)
   g_file_delete (cache_dir_file, NULL, NULL);
   g_object_unref (G_OBJECT (cache_dir_file));
 
-  soup_session_remove_feature (priv->session, cache);
+  soup_session_remove_feature (self->session, cache);
 }
 
 static void
 cache_up (GrlNetWc *self)
 {
   SoupCache *cache;
-  GrlNetWcPrivate *priv = self->priv;
   gchar *dir;
 
   GRL_DEBUG ("cache up");
@@ -275,11 +296,11 @@ cache_up (GrlNetWc *self)
   cache = soup_cache_new (dir, SOUP_CACHE_SINGLE_USER);
   g_free (dir);
 
-  soup_session_add_feature (priv->session,
+  soup_session_add_feature (self->session,
                             SOUP_SESSION_FEATURE (cache));
 
-  if (priv->cache_size) {
-    soup_cache_set_max_size (cache, priv->cache_size * 1024 * 1024);
+  if (self->cache_size) {
+    soup_cache_set_max_size (cache, self->cache_size * 1024 * 1024);
   }
 
   g_object_unref (cache);
@@ -288,7 +309,7 @@ cache_up (GrlNetWc *self)
 static gboolean
 cache_is_available (GrlNetWc *self)
 {
-  return soup_session_get_feature (self->priv->session, SOUP_TYPE_CACHE) != NULL;
+  return soup_session_get_feature (self->session, SOUP_TYPE_CACHE) != NULL;
 }
 
 static void
@@ -300,10 +321,8 @@ init_requester (GrlNetWc *self)
 static void
 finalize_requester (GrlNetWc *self)
 {
-  GrlNetWcPrivate *priv = self->priv;
-
   cache_down (self);
-  g_free (priv->previous_data);
+  g_free (self->previous_data);
 }
 
 static void
@@ -311,13 +330,14 @@ grl_net_wc_init (GrlNetWc *wc)
 {
   GRL_LOG_DOMAIN_INIT (wc_log_domain, "wc");
 
-  wc->priv = grl_net_wc_get_instance_private (wc);
-
-  wc->priv->session = soup_session_async_new ();
-  g_object_set (G_OBJECT (wc->priv->session), "ssl-use-system-ca-file", TRUE, NULL);
-  wc->priv->pending = g_queue_new ();
-
+#if ! SOUP_CHECK_VERSION (2, 99, 2)
+  wc->session = soup_session_async_new ();
+  g_object_set (G_OBJECT (wc->session), "ssl-use-system-ca-file", TRUE, NULL);
   set_thread_context (wc);
+#endif
+
+  wc->pending = g_queue_new ();
+
   init_mock_requester (wc);
   init_requester (wc);
 }
@@ -334,8 +354,9 @@ grl_net_wc_finalize (GObject *object)
   finalize_requester (wc);
   finalize_mock_requester (wc);
 
-  g_queue_free (wc->priv->pending);
-  g_object_unref (wc->priv->session);
+  g_clear_pointer (&wc->user_agent, g_free);
+  g_queue_free (wc->pending);
+  g_clear_object (&wc->session);
 
   G_OBJECT_CLASS (grl_net_wc_parent_class)->finalize (object);
 }
@@ -364,9 +385,13 @@ grl_net_wc_set_property (GObject *object,
     grl_net_wc_set_cache_size (wc, g_value_get_uint (value));
     break;
   case PROP_USER_AGENT:
-    g_object_set (G_OBJECT (wc->priv->session),
-                  "user-agent", g_value_get_string (value),
-                  NULL);
+    g_clear_pointer (&wc->user_agent, g_free);
+    wc->user_agent = g_value_dup_string (value);
+    if (wc->session) {
+      g_object_set (G_OBJECT (wc->session),
+                    "user-agent", wc->user_agent,
+                    NULL);
+    }
     break;
   default:
     G_OBJECT_WARN_INVALID_PROPERTY_ID (wc, propid, pspec);
@@ -385,19 +410,19 @@ grl_net_wc_get_property (GObject *object,
 
   switch (propid) {
   case PROP_LOG_LEVEL:
-    g_value_set_uint (value, wc->priv->log_level);
+    g_value_set_uint (value, wc->log_level);
     break;
   case PROP_THROTTLING:
-    g_value_set_uint (value, wc->priv->throttling);
+    g_value_set_uint (value, wc->throttling);
     break;
   case PROP_CACHE:
-    g_value_set_boolean(value, cache_is_available (wc));
+    g_value_set_boolean(value, wc->use_cache);
     break;
   case PROP_CACHE_SIZE:
-    g_value_set_uint (value, wc->priv->cache_size);
+    g_value_set_uint (value, wc->cache_size);
     break;
   case PROP_USER_AGENT:
-    g_object_get_property (G_OBJECT (wc->priv->session), "user_agent", value);
+    g_value_set_string (value, wc->user_agent);
     break;
   default:
     G_OBJECT_WARN_INVALID_PROPERTY_ID (wc, propid, pspec);
@@ -427,64 +452,65 @@ request_clos_destroy (gpointer data)
 static void
 parse_error (guint status,
              const gchar *reason,
-             const gchar *response,
-             GSimpleAsyncResult *result)
+             GTask *task)
 {
-  if (!response || *response == '\0')
-    response = reason;
-
   switch (status) {
+#if ! SOUP_CHECK_VERSION (2, 99, 2)
   case SOUP_STATUS_CANT_RESOLVE:
   case SOUP_STATUS_CANT_CONNECT:
   case SOUP_STATUS_SSL_FAILED:
   case SOUP_STATUS_IO_ERROR:
-    g_simple_async_result_set_error (result, GRL_NET_WC_ERROR,
-                                     GRL_NET_WC_ERROR_NETWORK_ERROR,
-                                     _("Cannot connect to the server"));
+    g_task_return_new_error (task, GRL_NET_WC_ERROR,
+                             GRL_NET_WC_ERROR_NETWORK_ERROR,
+                             _("Cannot connect to the server"));
     return;
   case SOUP_STATUS_CANT_RESOLVE_PROXY:
   case SOUP_STATUS_CANT_CONNECT_PROXY:
-    g_simple_async_result_set_error (result, G_IO_ERROR,
-                                     G_IO_ERROR_PROXY_FAILED,
-                                     _("Cannot connect to the proxy server"));
+    g_task_return_new_error (task, GRL_NET_WC_ERROR,
+                             G_IO_ERROR_PROXY_FAILED,
+                             _("Cannot connect to the proxy server"));
     return;
+#endif
   case SOUP_STATUS_INTERNAL_SERVER_ERROR: /* 500 */
+#if ! SOUP_CHECK_VERSION (2, 99, 2)
   case SOUP_STATUS_MALFORMED:
+#endif
   case SOUP_STATUS_BAD_REQUEST: /* 400 */
-    g_simple_async_result_set_error (result, GRL_NET_WC_ERROR,
-                                     GRL_NET_WC_ERROR_PROTOCOL_ERROR,
-                                     _("Invalid request URI or header: %s"),
-                                     response);
+    g_task_return_new_error (task, GRL_NET_WC_ERROR,
+                             GRL_NET_WC_ERROR_PROTOCOL_ERROR,
+                             _("Invalid request URI or header: %s"),
+                             reason);
     return;
   case SOUP_STATUS_UNAUTHORIZED: /* 401 */
   case SOUP_STATUS_FORBIDDEN: /* 403 */
-    g_simple_async_result_set_error (result, GRL_NET_WC_ERROR,
-                                     GRL_NET_WC_ERROR_AUTHENTICATION_REQUIRED,
-                                     _("Authentication required: %s"), response);
+    g_task_return_new_error (task, GRL_NET_WC_ERROR,
+                             GRL_NET_WC_ERROR_AUTHENTICATION_REQUIRED,
+                             _("Authentication required: %s"), reason);
     return;
   case SOUP_STATUS_NOT_FOUND: /* 404 */
-    g_simple_async_result_set_error (result, GRL_NET_WC_ERROR,
-                                     GRL_NET_WC_ERROR_NOT_FOUND,
-                                     _("The requested resource was not found: %s"),
-                                     response);
+    g_task_return_new_error (task, GRL_NET_WC_ERROR,
+                             GRL_NET_WC_ERROR_NOT_FOUND,
+                             _("The requested resource was not found: %s"),
+                             reason);
     return;
   case SOUP_STATUS_CONFLICT: /* 409 */
   case SOUP_STATUS_PRECONDITION_FAILED: /* 412 */
-    g_simple_async_result_set_error (result, GRL_NET_WC_ERROR,
-                                     GRL_NET_WC_ERROR_CONFLICT,
-                                     _("The entry has been modified since it was downloaded: %s"),
-                                     response);
+    g_task_return_new_error (task, GRL_NET_WC_ERROR,
+                             GRL_NET_WC_ERROR_CONFLICT,
+                             _("The entry has been modified since it was downloaded: %s"),
+                             reason);
     return;
+#if ! SOUP_CHECK_VERSION (2, 99, 2)
   case SOUP_STATUS_CANCELLED:
-    g_simple_async_result_set_error (result, G_IO_ERROR,
-                                     G_IO_ERROR_CANCELLED,
-                                     _("Operation was cancelled"));
+    g_task_return_new_error (task, GRL_NET_WC_ERROR,
+                             G_IO_ERROR_CANCELLED,
+                             _("Operation was cancelled"));
     return;
+#endif
   default:
     GRL_DEBUG ("Unhandled status: %s", soup_status_get_phrase (status));
-    g_simple_async_result_set_error (result, G_IO_ERROR,
-                                     G_IO_ERROR_FAILED,
-                                     "%s", soup_status_get_phrase (status));
+    g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "%s", soup_status_get_phrase (status));
   }
 }
 
@@ -501,14 +527,12 @@ build_request_filename (const char *uri)
 }
 
 static void
-dump_data (SoupURI *uri,
+dump_data (const char *uri_string,
            const char *buffer,
            const gsize length)
 {
   if (!capture_dir)
     return;
-
-  char *uri_string = soup_uri_to_string (uri, FALSE);
 
   /* Write request content to file in capture directory. */
   char *request_filename = build_request_filename (uri_string);
@@ -542,7 +566,6 @@ dump_data (SoupURI *uri,
   }
 
   g_free (request_filename);
-  g_free (uri_string);
 }
 
 static void
@@ -550,8 +573,8 @@ read_async_cb (GObject *source,
                GAsyncResult *res,
                gpointer user_data)
 {
-  GSimpleAsyncResult *result = G_SIMPLE_ASYNC_RESULT (user_data);
-  struct request_res *rr = g_simple_async_result_get_op_res_gpointer (result);;
+  GTask *task = G_TASK (user_data);
+  struct request_res *rr = g_task_get_task_data (task);
 
   GError *error = NULL;
   gssize s = g_input_stream_read_finish (G_INPUT_STREAM (source), res, &error);
@@ -588,37 +611,41 @@ read_async_cb (GObject *source,
 
   if (error) {
     if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-      g_simple_async_result_set_error (result, G_IO_ERROR,
-                                       G_IO_ERROR_CANCELLED,
-                                       _("Operation was cancelled"));
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                               _("Operation was cancelled"));
     } else {
-      g_simple_async_result_set_error (result, G_IO_ERROR,
-                                       G_IO_ERROR_FAILED,
-                                       _("Data not available"));
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               _("Data not available"));
     }
-
     g_error_free (error);
-
-    g_simple_async_result_complete (result);
-    g_object_unref (result);
+    g_object_unref (task);
     return;
   }
 
   {
-    SoupMessage *msg =
-      soup_request_http_get_message (SOUP_REQUEST_HTTP (rr->request));
+    g_autoptr(SoupMessage) msg = NULL;
+    guint status_code;
+    const char *reason_phrase;
 
-    if (msg && msg->status_code != SOUP_STATUS_OK) {
-        parse_error (msg->status_code,
-                     msg->reason_phrase,
-                     msg->response_body->data,
-                     G_SIMPLE_ASYNC_RESULT (user_data));
-        g_object_unref (msg);
+#if SOUP_CHECK_VERSION (2, 99, 2)
+    msg = g_object_ref (rr->message);
+    status_code = soup_message_get_status (msg);
+    reason_phrase = soup_message_get_reason_phrase (msg);
+#else
+    msg = soup_request_http_get_message (SOUP_REQUEST_HTTP (rr->request));
+    status_code = msg->status_code;
+    reason_phrase = msg->reason_phrase;
+#endif
+
+    if (status_code != SOUP_STATUS_OK) {
+        parse_error (status_code,
+                     reason_phrase,
+                     task);
+    } else {
+      g_task_return_boolean(task, TRUE);
     }
   }
-
-  g_simple_async_result_complete (result);
-  g_object_unref (result);
+  g_object_unref (task);
 }
 
 static void
@@ -626,28 +653,38 @@ reply_cb (GObject *source,
           GAsyncResult *res,
           gpointer user_data)
 {
-  GSimpleAsyncResult *result = G_SIMPLE_ASYNC_RESULT (user_data);
-  struct request_res *rr = g_simple_async_result_get_op_res_gpointer (result);
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  SoupSession *session = SOUP_SESSION (source);
+  SoupMessage *message = soup_session_get_async_result_message (session, res);
+  SoupMessageHeaders *response_hdrs = soup_message_get_response_headers (message);
+#endif
+  GTask *task = G_TASK (user_data);
+  struct request_res *rr = g_task_get_task_data (task);
 
   GError *error = NULL;
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  GInputStream *in = soup_session_send_finish (session, res, &error);
+#else
   GInputStream *in = soup_request_send_finish (rr->request, res, &error);
+#endif
 
   if (error) {
     if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED)) {
-      g_simple_async_result_set_from_error (result, error);
+      g_task_return_error (task, error);
     } else {
-      g_simple_async_result_set_error (result, G_IO_ERROR,
-                                       G_IO_ERROR_FAILED,
-                                       _("Data not available"));
+      g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
+                               _("Data not available"));
+      g_error_free (error);
     }
-    g_error_free (error);
-
-    g_simple_async_result_complete (result);
-    g_object_unref (result);
+    g_object_unref (task);
     return;
   }
 
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  rr->length = soup_message_headers_get_content_length (response_hdrs) + 1;
+#else
   rr->length = soup_request_get_content_length (rr->request) + 1;
+#endif
   if (rr->length == 1)
     rr->length = 50 * 1024;
 
@@ -669,50 +706,63 @@ get_url_now (GrlNetWc *self,
              GAsyncResult *result,
              GCancellable *cancellable)
 {
-  GrlNetWcPrivate *priv = self->priv;
-  SoupURI *uri;
   struct request_res *rr = g_slice_new0 (struct request_res);
+  g_task_set_task_data (G_TASK (result), rr, NULL);
 
-  g_simple_async_result_set_op_res_gpointer (G_SIMPLE_ASYNC_RESULT (result),
-                                             rr,
-                                             NULL);
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  {
+    g_autoptr(GUri) uri = NULL;
 
-  uri = soup_uri_new (url);
-  if (uri) {
-    rr->request = soup_session_request_uri (priv->session, uri, NULL);
-    soup_uri_free (uri);
-  } else {
-    rr->request = NULL;
+    uri = g_uri_parse (url, SOUP_HTTP_URI_FLAGS, NULL);
+    rr->message = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
   }
+#else
+  rr->request = soup_session_request (self->session, url, NULL);
+#endif
 
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  if (!rr->message) {
+#else
   if (!rr->request) {
-    g_simple_async_result_set_error (G_SIMPLE_ASYNC_RESULT (result),
-                                     G_IO_ERROR,
-                                     G_IO_ERROR_INVALID_ARGUMENT,
-                                     _("Invalid URL %s"),
-                                     url);
-    g_simple_async_result_complete (G_SIMPLE_ASYNC_RESULT (result));
+#endif
+    g_task_return_new_error (G_TASK (result),
+                             G_IO_ERROR,
+                             G_IO_ERROR_INVALID_ARGUMENT,
+                             _("Invalid URL %s"),
+                             url);
     g_object_unref (result);
     return;
   }
 
   if (headers != NULL) {
-    SoupMessage *message;
+    g_autoptr(SoupMessage) message = NULL;
     GHashTableIter iter;
     const char *key, *value;
 
+#if SOUP_CHECK_VERSION (2, 99, 2)
+    message = g_object_ref (rr->message);
+#else
     message = soup_request_http_get_message (SOUP_REQUEST_HTTP (rr->request));
+#endif
 
     if (message) {
       g_hash_table_iter_init (&iter, headers);
       while (g_hash_table_iter_next (&iter, (gpointer *) &key, (gpointer *)&value)) {
+#if SOUP_CHECK_VERSION (2, 99, 2)
+        soup_message_headers_append (soup_message_get_request_headers (message), key, value);
+#else
         soup_message_headers_append (message->request_headers, key, value);
+#endif
       }
-      g_object_unref (message);
     }
   }
 
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  soup_session_send_async (self->session, rr->message, G_PRIORITY_DEFAULT,
+                         cancellable, reply_cb, result);
+#else
   soup_request_send_async (rr->request, cancellable, reply_cb, result);
+#endif
 }
 
 static gboolean
@@ -722,8 +772,7 @@ get_url_cb (gpointer user_data)
 
   /* validation */
   {
-    GrlNetWcPrivate *priv = c->self->priv;
-    struct request_clos *d = g_queue_pop_tail (priv->pending);
+    struct request_clos *d = g_queue_pop_tail (c->self->pending);
     g_assert (c == d);
   }
 
@@ -745,7 +794,6 @@ get_url (GrlNetWc *self,
   guint id;
   gint64 now;
   struct request_clos *c;
-  GrlNetWcPrivate *priv = self->priv;
 
   /* closure */
   c = g_new (struct request_clos, 1);
@@ -760,24 +808,24 @@ get_url (GrlNetWc *self,
   /* If grl-net-wc is not mocked, we need to check if throttling is set
    * otherwise the throttling delay check would always be true */
   if (is_mocked ()
-      || priv->throttling == 0
-      || (now - priv->last_request) > priv->throttling) {
-    priv->last_request = now;
+      || self->throttling == 0
+      || (now - self->last_request) > self->throttling) {
+    self->last_request = now;
     id = g_idle_add_full (G_PRIORITY_HIGH_IDLE,
                           get_url_cb, c, request_clos_destroy);
   } else {
-    priv->last_request += priv->throttling;
+    self->last_request += self->throttling;
 
     GRL_DEBUG ("delaying web request by %" G_GINT64_FORMAT " seconds",
-               priv->last_request - now);
+               self->last_request - now);
     id = g_timeout_add_seconds_full (G_PRIORITY_DEFAULT,
-                                     priv->last_request - now,
+                                     self->last_request - now,
                                      get_url_cb, c, request_clos_destroy);
   }
   g_source_set_name_by_id (id, "[grl-net] get_url_cb");
 
   c->source_id = id;
-  g_queue_push_head (self->priv->pending, c);
+  g_queue_push_head (self->pending, c);
 }
 
 static void
@@ -786,25 +834,30 @@ get_content (GrlNetWc *self,
              gchar **content,
              gsize *length)
 {
-  GrlNetWcPrivate *priv = self->priv;
   struct request_res *rr = op;
 
-  g_clear_pointer (&priv->previous_data, g_free);
+  g_clear_pointer (&self->previous_data, g_free);
 
   if (is_mocked ()) {
-    get_content_mocked (self, op, &(priv->previous_data), length);
+    get_content_mocked (self, op, &(self->previous_data), length);
   } else {
-    dump_data (soup_request_get_uri (rr->request),
+    g_autofree char *uri = NULL;
+#if SOUP_CHECK_VERSION (2, 99, 2)
+    uri = g_uri_to_string (soup_message_get_uri (rr->message));
+#else
+    uri = soup_uri_to_string (soup_request_get_uri (rr->request), FALSE);
+#endif
+    dump_data (uri,
                rr->buffer,
                rr->offset);
-    priv->previous_data = rr->buffer;
+    self->previous_data = rr->buffer;
     if (length) {
       *length = rr->offset;
     }
   }
 
   if (content)
-    *content = self->priv->previous_data;
+    *content = self->previous_data;
   else {
     if (length) {
       *length = 0;
@@ -932,14 +985,12 @@ grl_net_wc_request_with_headers_hash_async (GrlNetWc *self,
                                             GAsyncReadyCallback callback,
                                             gpointer user_data)
 {
-  GSimpleAsyncResult *result;
-
-  result = g_simple_async_result_new (G_OBJECT (self),
-                                      callback,
-                                      user_data,
-                                      grl_net_wc_request_async);
-
-  get_url (self, uri, headers, G_ASYNC_RESULT (result), cancellable);
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  ensure_session (self);
+#endif
+  GTask *task = g_task_new (G_OBJECT (self), NULL, callback, user_data);
+  g_task_set_source_tag (task, grl_net_wc_request_async);
+  get_url (self, uri, headers, G_ASYNC_RESULT (task), cancellable);
 }
 
 
@@ -969,28 +1020,26 @@ grl_net_wc_request_finish (GrlNetWc *self,
                            gsize *length,
                            GError **error)
 {
-  GSimpleAsyncResult *res = G_SIMPLE_ASYNC_RESULT (result);
-  gboolean ret = TRUE;
+  GTask *task = G_TASK (result);
 
-  g_warn_if_fail (g_simple_async_result_get_source_tag (res) ==
-                  grl_net_wc_request_async);
+  g_warn_if_fail (g_task_get_source_tag (task) == grl_net_wc_request_async);
 
-  void *op = g_simple_async_result_get_op_res_gpointer (res);
+  void *op;
+  if (is_mocked())
+    op = g_task_propagate_pointer (task, error);
+  else
+    op = g_task_get_task_data (task);
 
-  if (g_simple_async_result_propagate_error (res, error) == TRUE) {
-    ret = FALSE;
-    goto end_func;
+  if (!g_task_had_error (task)) {
+    get_content(self, op, content, length);
   }
 
-  get_content(self, op, content, length);
-
-end_func:
   if (is_mocked ())
     free_mock_op_res (op);
   else
     free_op_res (op);
 
-  return ret;
+  return !g_task_had_error (task);
 }
 
 /**
@@ -1010,16 +1059,21 @@ grl_net_wc_set_log_level (GrlNetWc *self,
   g_return_if_fail (log_level <= 3);
   g_return_if_fail (GRL_IS_NET_WC (self));
 
-  if (self->priv->log_level == log_level)
+  self->log_level = log_level;
+  if (!self->session)
     return;
 
-  soup_session_remove_feature_by_type (self->priv->session, SOUP_TYPE_LOGGER);
+  soup_session_remove_feature_by_type (self->session, SOUP_TYPE_LOGGER);
 
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  logger = soup_logger_new ((SoupLoggerLogLevel) log_level);
+#else
   logger = soup_logger_new ((SoupLoggerLogLevel) log_level, -1);
-  soup_session_add_feature (self->priv->session, SOUP_SESSION_FEATURE (logger));
+#endif
+  soup_session_add_feature (self->session, SOUP_SESSION_FEATURE (logger));
   g_object_unref (logger);
 
-  self->priv->log_level = (SoupLoggerLogLevel) log_level;
+  self->log_level = (SoupLoggerLogLevel) log_level;
 }
 
 /**
@@ -1029,6 +1083,10 @@ grl_net_wc_set_log_level (GrlNetWc *self,
  *
  * Setting this property, the #GrlNetWc will queue all the requests and
  * will dispatch them with a pause between them of this value.
+ *
+ * Note that if the grl-net library was compiled against libsoup3, changing
+ * the throttling configuration will show a warning if done after the first
+ * request.
  */
 void
 grl_net_wc_set_throttling (GrlNetWc *self,
@@ -1036,17 +1094,26 @@ grl_net_wc_set_throttling (GrlNetWc *self,
 {
   g_return_if_fail (GRL_IS_NET_WC (self));
 
+  self->throttling = throttling;
+  if (!self->session)
+    return;
+
+#if SOUP_CHECK_VERSION (2, 99, 2)
+  if (self->session) {
+    g_warning ("\"throttling\" can only be set before the first request is made.");
+    return;
+  }
+#endif
+
   if (throttling > 0) {
     /* max conns per host = 1 */
-    g_object_set (self->priv->session,
-                  SOUP_SESSION_MAX_CONNS_PER_HOST, 1, NULL);
+    g_object_set (self->session,
+                  "max-conns-per-host", 1, NULL);
   } else {
     /* default value */
-    g_object_set (self->priv->session,
-                  SOUP_SESSION_MAX_CONNS_PER_HOST, 2, NULL);
+    g_object_set (self->session,
+                  "max-conns-per-host", 2, NULL);
   }
-
-  self->priv->throttling = throttling;
 }
 
 /**
@@ -1065,6 +1132,10 @@ grl_net_wc_set_cache (GrlNetWc *self,
                       gboolean use_cache)
 {
   g_return_if_fail (GRL_IS_NET_WC (self));
+
+  self->use_cache = use_cache;
+  if (!self->session)
+    return;
 
   if (use_cache && !cache_is_available (self))
     cache_up (self);
@@ -1088,12 +1159,11 @@ grl_net_wc_set_cache_size (GrlNetWc *self,
 {
   g_return_if_fail (GRL_IS_NET_WC (self));
 
-  if (self->priv->cache_size == size)
+  self->cache_size = size;
+  if (!self->session)
     return;
 
-  self->priv->cache_size = size;
-
-  SoupSessionFeature *cache = soup_session_get_feature (self->priv->session, SOUP_TYPE_CACHE);
+  SoupSessionFeature *cache = soup_session_get_feature (self->session, SOUP_TYPE_CACHE);
   if (!cache)
     return;
 
@@ -1109,17 +1179,16 @@ grl_net_wc_set_cache_size (GrlNetWc *self,
 void
 grl_net_wc_flush_delayed_requests (GrlNetWc *self)
 {
-  GrlNetWcPrivate *priv = self->priv;
   struct request_clos *c;
 
   g_return_if_fail (GRL_IS_NET_WC (self));
 
-  while ((c = g_queue_pop_head (priv->pending))) {
+  while ((c = g_queue_pop_head (self->pending))) {
     if (c->cancellable)
       g_cancellable_cancel (c->cancellable);
     /* This will call the destroy notify, request_clos_destroy()  */
     g_source_remove (c->source_id);
   }
 
-  priv->last_request = g_get_real_time() / G_USEC_PER_SEC;
+  self->last_request = g_get_real_time() / G_USEC_PER_SEC;
 }

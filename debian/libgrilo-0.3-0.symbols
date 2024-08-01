@@ -447,6 +447,7 @@ libgrilo-0.3.so.0 libgrilo-0.3-0 #MINVER#
  (optional)registry_log_domain@Base 0.3.0
  (optional)source_log_domain@Base 0.3.0
 libgrlnet-0.3.so.0 libgrilo-0.3-0 #MINVER#
+* Build-Depends-Package: libgrilo-0.3-dev
  grl_net_wc_error_quark@Base 0.3.0
  grl_net_wc_flush_delayed_requests@Base 0.3.0
  grl_net_wc_get_type@Base 0.3.0
@@ -460,6 +461,7 @@ libgrlnet-0.3.so.0 libgrilo-0.3-0 #MINVER#
  grl_net_wc_set_log_level@Base 0.3.0
  grl_net_wc_set_throttling@Base 0.3.0
 libgrlpls-0.3.so.0 libgrilo-0.3-0 #MINVER#
+* Build-Depends-Package: libgrilo-0.3-dev
  grl_pls_browse@Base 0.3.0
  grl_pls_browse_by_spec@Base 0.3.0
  grl_pls_browse_sync@Base 0.3.0
